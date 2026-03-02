@@ -35,6 +35,12 @@ class UNet(ModelMixin, ConfigMixin):
         sample_size: Optional[int] = None,
         in_channels: int = 4,
         out_channels: int = 4,
+        # FreeU-related config
+        use_freeu: bool = False,
+        freeu_b1: float = 1.0,
+        freeu_b2: float = 1.0,
+        freeu_s1: float = 1.0,
+        freeu_s2: float = 1.0,
         flip_sin_to_cos: bool = True,
         freq_shift: int = 0,
         down_block_types: Tuple[str] = None,
@@ -193,6 +199,46 @@ class UNet(ModelMixin, ConfigMixin):
         if isinstance(module, (DownBlock2D, UpBlock2D)):
             module.gradient_checkpointing = value
 
+    def _apply_freeu(
+        self,
+        sample: torch.FloatTensor,
+        res_samples: Tuple[torch.FloatTensor, ...],
+        up_block_index: int,
+    ) -> Tuple[torch.FloatTensor, Tuple[torch.FloatTensor, ...]]:
+        """
+        Apply a lightweight FreeU-style re-weighting between backbone features (`sample`)
+        and skip features (`res_samples`) during decoding.
+
+        We follow the practical implementation used for Stable Diffusion in diffusers:
+        - Use two backbone scaling factors (b1, b2)
+        - Use two skip scaling factors (s1, s2)
+        applied to the last two upsampling stages.
+        """
+        if not getattr(self.config, "use_freeu", False):
+            return sample, res_samples
+
+        num_up_blocks = len(self.up_blocks)
+
+        # Map from current up block index to which set of (b, s) to use.
+        # We treat the last two up blocks (highest resolutions) as the FreeU blocks.
+        if up_block_index == num_up_blocks - 1:
+            b = getattr(self.config, "freeu_b1", 1.0)
+            s = getattr(self.config, "freeu_s1", 1.0)
+        elif up_block_index == num_up_blocks - 2:
+            b = getattr(self.config, "freeu_b2", 1.0)
+            s = getattr(self.config, "freeu_s2", 1.0)
+        else:
+            return sample, res_samples
+
+        if b != 1.0:
+            sample = sample * b
+
+        if s != 1.0 and len(res_samples) > 0:
+            # Scale all skip features for this stage.
+            res_samples = tuple(r * s for r in res_samples)
+
+        return sample, res_samples
+
     def forward(
         self,
         sample: torch.FloatTensor,
@@ -273,6 +319,9 @@ class UNet(ModelMixin, ConfigMixin):
             # upsample size, we do it here
             if not is_final_block and forward_upsample_size:
                 upsample_size = down_block_res_samples[-1].shape[2:]
+
+            # Apply FreeU re-weighting between backbone features and skip features
+            sample, res_samples = self._apply_freeu(sample, res_samples, i)
 
             if (hasattr(upsample_block, "attentions") and upsample_block.attentions is not None) or hasattr(upsample_block, "content_attentions"):
                 sample, offset_out = upsample_block(

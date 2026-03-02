@@ -26,6 +26,12 @@ def get_parser():
     parser.add_argument("--content_encoder_downsample_size", type=int, default=3, 
                         help="The downsample size of the content encoder.")
     parser.add_argument("--channel_attn", type=bool, default=True, help="Whether to use the se attention.",)
+    # FreeU config (inference-time U-Net re-weighting)
+    parser.add_argument("--use_freeu", type=bool, default=False, help="Whether to enable FreeU in UNet decoding.")
+    parser.add_argument("--freeu_b1", type=float, default=1.0, help="FreeU backbone scaling factor for the highest-res up block.")
+    parser.add_argument("--freeu_b2", type=float, default=1.0, help="FreeU backbone scaling factor for the 2nd-highest-res up block.")
+    parser.add_argument("--freeu_s1", type=float, default=1.0, help="FreeU skip scaling factor for the highest-res up block.")
+    parser.add_argument("--freeu_s2", type=float, default=1.0, help="FreeU skip scaling factor for the 2nd-highest-res up block.")
     parser.add_argument("--content_start_channel", type=int, default=64, 
                         help="The channels of the fisrt layer output of content encoder.",)
     parser.add_argument("--style_start_channel", type=int, default=64, 
