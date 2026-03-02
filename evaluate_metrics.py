@@ -103,6 +103,7 @@ def evaluate_metrics(
     gen_dir: str,
     image_size: int = 256,
     device: str = "cuda",
+    min_fid_samples: int = 10,
 ) -> Tuple[float, float, float]:
     """
     Compute FID, SSIM, LPIPS between images in two folders.
@@ -120,10 +121,14 @@ def evaluate_metrics(
     if not common_files:
         raise ValueError(f"No common image filenames between {real_dir} and {gen_dir}.")
 
-    print(f"Found {len(common_files)} paired images.")
+    num_pairs = len(common_files)
+    print(f"Found {num_pairs} paired images.")
+
+    # FID 需要足够多的样本才稳定，这里如果样本过少则跳过 FID 计算。
+    use_fid = num_pairs >= min_fid_samples
 
     # Build models
-    fid_metric = compute_fid_model(device_t)
+    fid_metric = compute_fid_model(device_t) if use_fid else None
     lpips_model = compute_lpips_model(device_t)
 
     ssim_values: List[float] = []
@@ -138,8 +143,9 @@ def evaluate_metrics(
             gen_img = load_image(gen_path, image_size=image_size)
 
             # FID expects batches in (B, 3, H, W)
-            fid_metric.update(real_img.unsqueeze(0).to(device_t), real=True)
-            fid_metric.update(gen_img.unsqueeze(0).to(device_t), real=False)
+            if fid_metric is not None:
+                fid_metric.update(real_img.unsqueeze(0).to(device_t), real=True)
+                fid_metric.update(gen_img.unsqueeze(0).to(device_t), real=False)
 
             # SSIM on [0, 1]
             ssim_values.append(compute_ssim_torch(real_img.to(device_t), gen_img.to(device_t)))
@@ -150,7 +156,13 @@ def evaluate_metrics(
             lp = lpips_model(real_lp.unsqueeze(0), gen_lp.unsqueeze(0)).item()
             lpips_values.append(lp)
 
-    fid_score = float(fid_metric.compute().cpu().item())
+    if fid_metric is not None:
+        try:
+            fid_score = float(fid_metric.compute().cpu().item())
+        except Exception:
+            fid_score = float("nan")
+    else:
+        fid_score = float("nan")
     ssim_mean = float(np.mean(ssim_values))
     lpips_mean = float(np.mean(lpips_values))
 
@@ -199,7 +211,10 @@ if __name__ == "__main__":
     )
 
     print("==== Metrics ====")
-    print(f"FID   : {fid:.4f}  (lower is better)")
+    if np.isnan(fid):
+        print("FID   : N/A (not enough samples or numerical issue; requires many images)")
+    else:
+        print(f"FID   : {fid:.4f}  (lower is better)")
     print(f"SSIM  : {ssim_val:.4f}  (higher is better)")
     print(f"LPIPS : {lpips_val:.4f}  (lower is better)")
 
