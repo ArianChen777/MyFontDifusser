@@ -199,6 +199,34 @@ class UNet(ModelMixin, ConfigMixin):
         if isinstance(module, (DownBlock2D, UpBlock2D)):
             module.gradient_checkpointing = value
 
+    @staticmethod
+    def _fourier_filter(
+        x: torch.FloatTensor,
+        threshold: int,
+        scale: float,
+    ) -> torch.FloatTensor:
+        """
+        Attenuate low-frequency components of `x` in the Fourier domain.
+
+        Frequencies within a square of side 2*threshold centred on DC are
+        multiplied by `scale` (typically < 1); all other frequencies are
+        left unchanged.  Matches the reference implementation shipped with
+        the FreeU paper (FreeU/demo/free_lunch_utils.py:Fourier_filter).
+        """
+        dtype = x.dtype
+        x_f = torch.fft.fftn(x.float(), dim=(-2, -1))
+        x_f = torch.fft.fftshift(x_f, dim=(-2, -1))
+
+        B, C, H, W = x_f.shape
+        mask = torch.ones(B, C, H, W, device=x.device, dtype=x_f.real.dtype)
+        crow, ccol = H // 2, W // 2
+        mask[..., crow - threshold:crow + threshold,
+                  ccol - threshold:ccol + threshold] = scale
+        x_f = x_f * mask
+
+        x_f = torch.fft.ifftshift(x_f, dim=(-2, -1))
+        return torch.fft.ifftn(x_f, dim=(-2, -1)).real.to(dtype)
+
     def _apply_freeu(
         self,
         sample: torch.FloatTensor,
@@ -206,36 +234,46 @@ class UNet(ModelMixin, ConfigMixin):
         up_block_index: int,
     ) -> Tuple[torch.FloatTensor, Tuple[torch.FloatTensor, ...]]:
         """
-        Apply a lightweight FreeU-style re-weighting between backbone features (`sample`)
-        and skip features (`res_samples`) during decoding.
+        Apply FreeU re-weighting to backbone features (`sample`) and skip
+        features (`res_samples`) at the first two decoder stages (lowest
+        resolution, closest to the bottleneck).
 
-        We follow the practical implementation used for Stable Diffusion in diffusers:
-        - Use two backbone scaling factors (b1, b2)
-        - Use two skip scaling factors (s1, s2)
-        applied to the last two upsampling stages.
+        Backbone scaling: multiply the first C/2 channels by b, leaving the
+        remaining channels unchanged — identical to the paper's reference
+        implementation (free_lunch_utils.py).
+
+        Skip scaling: attenuate low-frequency components via an FFT Fourier
+        filter with threshold=1, matching the paper's reference impl.
+        threshold=1 is conservative and well-suited to FontDiffuser's small
+        96×96 feature maps (12×12 and 24×24 at the two FreeU stages).
         """
         if not getattr(self.config, "use_freeu", False):
             return sample, res_samples
 
-        num_up_blocks = len(self.up_blocks)
-
-        # Map from current up block index to which set of (b, s) to use.
-        # We treat the last two up blocks (highest resolutions) as the FreeU blocks.
-        if up_block_index == num_up_blocks - 1:
+        # Apply b1/s1 at the first decoder stage (lowest resolution),
+        # b2/s2 at the second — both closest to the bottleneck where
+        # backbone semantic strength matters most.
+        if up_block_index == 0:
             b = getattr(self.config, "freeu_b1", 1.0)
             s = getattr(self.config, "freeu_s1", 1.0)
-        elif up_block_index == num_up_blocks - 2:
+        elif up_block_index == 1:
             b = getattr(self.config, "freeu_b2", 1.0)
             s = getattr(self.config, "freeu_s2", 1.0)
         else:
             return sample, res_samples
 
+        # Backbone: scale only the first half of channels.
         if b != 1.0:
-            sample = sample * b
+            C = sample.shape[1]
+            sample = sample.clone()
+            sample[:, :C // 2] = sample[:, :C // 2] * b
 
+        # Skip connections: attenuate low-frequency components via FFT.
         if s != 1.0 and len(res_samples) > 0:
-            # Scale all skip features for this stage.
-            res_samples = tuple(r * s for r in res_samples)
+            res_samples = tuple(
+                self._fourier_filter(r, threshold=1, scale=s)
+                for r in res_samples
+            )
 
         return sample, res_samples
 
