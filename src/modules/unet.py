@@ -214,18 +214,20 @@ class UNet(ModelMixin, ConfigMixin):
         the FreeU paper (FreeU/demo/free_lunch_utils.py:Fourier_filter).
         """
         dtype = x.dtype
-        x_f = torch.fft.fftn(x.float(), dim=(-2, -1))
+        device = x.device
+        # Perform FFT on CPU to avoid cuFFT errors on older PyTorch/CUDA.
+        x_f = torch.fft.fftn(x.float().cpu(), dim=(-2, -1))
         x_f = torch.fft.fftshift(x_f, dim=(-2, -1))
 
         B, C, H, W = x_f.shape
-        mask = torch.ones(B, C, H, W, device=x.device, dtype=x_f.real.dtype)
+        mask = torch.ones(B, C, H, W, dtype=x_f.real.dtype)
         crow, ccol = H // 2, W // 2
         mask[..., crow - threshold:crow + threshold,
                   ccol - threshold:ccol + threshold] = scale
         x_f = x_f * mask
 
         x_f = torch.fft.ifftshift(x_f, dim=(-2, -1))
-        return torch.fft.ifftn(x_f, dim=(-2, -1)).real.to(dtype)
+        return torch.fft.ifftn(x_f, dim=(-2, -1)).real.to(dtype).to(device)
 
     def _apply_freeu(
         self,
